@@ -19,7 +19,10 @@ type Workload struct {
 	ReadOnlyRootFilesystem bool        `json:"read_only_root_filesystem"` // true if all containers have readOnlyRootFilesystem
 	HasNetworkPolicy       bool        `json:"has_network_policy"`        // true if namespace has NetworkPolicy
 	Containers             []Container `json:"containers"`
-	ScanStatus             string      `json:"scan_status"` // scanned, pending, failed, unknown
+	ScanStatus             string      `json:"scan_status"`        // scanned, pending, failed, unknown
+	HelmReleaseName        string      `json:"helm_release_name"`  // from app.kubernetes.io/instance label
+	HelmChartName          string      `json:"helm_chart_name"`    // from helm.sh/chart label (parsed)
+	HelmChartVersion       string      `json:"helm_chart_version"` // from helm.sh/chart label (parsed)
 }
 
 // getServiceAccountName returns the service account name from a pod spec,
@@ -121,6 +124,8 @@ func (c *Client) ListDeployments(ctx context.Context, namespace string) ([]Workl
 			})
 		}
 
+		releaseName, chartName, chartVersion := extractHelmMetadata(dep.Labels)
+
 		workloads = append(workloads, Workload{
 			Kind:                   "Deployment",
 			Namespace:              dep.Namespace,
@@ -131,6 +136,9 @@ func (c *Client) ListDeployments(ctx context.Context, namespace string) ([]Workl
 			ReadOnlyRootFilesystem: hasReadOnlyRootFilesystem(dep.Spec.Template.Spec),
 			HasNetworkPolicy:       false, // Set later based on namespace lookup
 			Containers:             containers,
+			HelmReleaseName:        releaseName,
+			HelmChartName:          chartName,
+			HelmChartVersion:       chartVersion,
 		})
 	}
 	return workloads, nil
@@ -153,6 +161,8 @@ func (c *Client) ListDaemonSets(ctx context.Context, namespace string) ([]Worklo
 			})
 		}
 
+		releaseName, chartName, chartVersion := extractHelmMetadata(ds.Labels)
+
 		workloads = append(workloads, Workload{
 			Kind:                   "DaemonSet",
 			Namespace:              ds.Namespace,
@@ -163,6 +173,9 @@ func (c *Client) ListDaemonSets(ctx context.Context, namespace string) ([]Worklo
 			ReadOnlyRootFilesystem: hasReadOnlyRootFilesystem(ds.Spec.Template.Spec),
 			HasNetworkPolicy:       false, // Set later based on namespace lookup
 			Containers:             containers,
+			HelmReleaseName:        releaseName,
+			HelmChartName:          chartName,
+			HelmChartVersion:       chartVersion,
 		})
 	}
 	return workloads, nil
@@ -185,6 +198,8 @@ func (c *Client) ListStatefulSets(ctx context.Context, namespace string) ([]Work
 			})
 		}
 
+		releaseName, chartName, chartVersion := extractHelmMetadata(ss.Labels)
+
 		workloads = append(workloads, Workload{
 			Kind:                   "StatefulSet",
 			Namespace:              ss.Namespace,
@@ -195,6 +210,9 @@ func (c *Client) ListStatefulSets(ctx context.Context, namespace string) ([]Work
 			ReadOnlyRootFilesystem: hasReadOnlyRootFilesystem(ss.Spec.Template.Spec),
 			HasNetworkPolicy:       false, // Set later based on namespace lookup
 			Containers:             containers,
+			HelmReleaseName:        releaseName,
+			HelmChartName:          chartName,
+			HelmChartVersion:       chartVersion,
 		})
 	}
 	return workloads, nil
@@ -331,4 +349,42 @@ func (c *Client) GetNamespacesWithNetworkPolicy(ctx context.Context) (map[string
 	}
 
 	return nsWithPolicy, nil
+}
+
+// extractHelmMetadata extracts Helm release information from Kubernetes resource labels.
+// Returns empty strings if the resource is not managed by Helm.
+func extractHelmMetadata(labels map[string]string) (releaseName, chartName, chartVersion string) {
+	// Check if resource is managed by Helm
+	if labels["app.kubernetes.io/managed-by"] != "Helm" {
+		return "", "", ""
+	}
+
+	// Extract release name
+	releaseName = labels["app.kubernetes.io/instance"]
+
+	// Extract chart name and version from helm.sh/chart label
+	// Format: "ingress-nginx-4.9.0" or "kube-prometheus-stack-55.0.0"
+	chartLabel := labels["helm.sh/chart"]
+	if chartLabel != "" {
+		chartName, chartVersion = parseHelmChartLabel(chartLabel)
+	}
+
+	return releaseName, chartName, chartVersion
+}
+
+// parseHelmChartLabel splits "chart-name-1.2.3" into name and version.
+// Handles chart names with dashes by splitting on the last dash that precedes a version-like string.
+func parseHelmChartLabel(label string) (name, version string) {
+	// Find last dash that has a digit after it (indicates version)
+	for i := len(label) - 1; i >= 0; i-- {
+		if label[i] == '-' && i+1 < len(label) && isDigit(label[i+1]) {
+			return label[:i], label[i+1:]
+		}
+	}
+	// No version-like pattern found, return entire label as name
+	return label, ""
+}
+
+func isDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }
